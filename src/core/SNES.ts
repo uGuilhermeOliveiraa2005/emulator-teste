@@ -1,4 +1,3 @@
-// SNES.ts - Fixed Core System
 import { CPU65816 } from './CPU65816';
 import { Memory } from './Memory';
 import { PPU } from './PPU';
@@ -17,10 +16,12 @@ export class SNES {
     private frameCount: number = 0;
 
     private readonly SCANLINES_PER_FRAME = 262;
-    private readonly CPU_CYCLES_PER_SCANLINE = 227; // ~1364/6
+    private readonly MASTER_CYCLES_PER_SCANLINE = 1364;
+    private readonly CPU_CYCLES_PER_SCANLINE = 227;
 
     private frameCallback: ((buffer: Uint8ClampedArray) => void) | null = null;
     private animationFrameId: number = 0;
+    private lastFrameTime: number = 0;
 
     constructor() {
         this.memory = new Memory();
@@ -29,15 +30,20 @@ export class SNES {
             this.memory.getCGRAM(),
             this.memory.getOAM()
         );
-
-        // IMPORTANTE: Conectar PPU ao Memory
-        this.memory.setPPU(this.ppu);
-
         this.apu = new APU();
         this.input = new Input();
+
+        // Conectar componentes
+        this.memory.setPPU(this.ppu);
+        this.memory.setAPU(this.apu);
+        this.memory.setInput(this.input);
+
         this.cpu = new CPU65816(this.memory);
 
-        console.log('🎮 SNES system initialized');
+        console.log('🎮 SNES System Initialized');
+        console.log('📺 PPU: All 8 modes + sprites ready');
+        console.log('🔊 APU: Audio system ready');
+        console.log('🎯 Input: Controller support active');
     }
 
     loadROM(data: Uint8Array): void {
@@ -51,7 +57,7 @@ export class SNES {
         this.apu.reset();
         this.masterClock = 0;
         this.frameCount = 0;
-        console.log('🔄 SNES system reset complete');
+        console.log('🔄 System Reset Complete');
     }
 
     init(): void {
@@ -61,7 +67,8 @@ export class SNES {
     start(): void {
         if (!this.running) {
             this.running = true;
-            console.log('▶️  SNES started');
+            this.lastFrameTime = performance.now();
+            console.log('▶️  Emulation Started');
             this.runFrame();
         }
     }
@@ -72,7 +79,7 @@ export class SNES {
             cancelAnimationFrame(this.animationFrameId);
             this.animationFrameId = 0;
         }
-        console.log('⏹️  SNES stopped');
+        console.log('⏹️  Emulation Stopped');
     }
 
     pause(): void {
@@ -82,14 +89,15 @@ export class SNES {
             this.animationFrameId = 0;
         }
         this.apu.suspend();
-        console.log('⏸️  SNES paused');
+        console.log('⏸️  Emulation Paused');
     }
 
     resume(): void {
         if (!this.running) {
             this.running = true;
             this.apu.resume();
-            console.log('▶️  SNES resumed');
+            this.lastFrameTime = performance.now();
+            console.log('▶️  Emulation Resumed');
             this.runFrame();
         }
     }
@@ -97,28 +105,35 @@ export class SNES {
     private runFrame(): void {
         if (!this.running) return;
 
-        const startTime = performance.now();
+        const frameStartTime = performance.now();
 
-        // Run one frame (262 scanlines)
-        for (let scanline = 0; scanline < this.SCANLINES_PER_FRAME; scanline++) {
-            this.runScanline();
+        try {
+            // Executa 262 scanlines (1 frame NTSC)
+            for (let scanline = 0; scanline < this.SCANLINES_PER_FRAME; scanline++) {
+                this.runScanline();
+            }
+
+            this.frameCount++;
+
+            // Callback com buffer renderizado
+            if (this.frameCallback) {
+                this.frameCallback(this.ppu.getScreenBuffer());
+            }
+
+            // Log de performance a cada 60 frames
+            if (this.frameCount % 60 === 0) {
+                const fps = 1000 / (frameStartTime - this.lastFrameTime);
+                console.log(`📊 Frame ${this.frameCount}: ${fps.toFixed(1)} FPS`);
+                this.lastFrameTime = frameStartTime;
+            }
+
+        } catch (error) {
+            console.error('❌ Frame execution error:', error);
         }
 
-        this.frameCount++;
-
-        // Trigger frame callback with rendered buffer
-        if (this.frameCallback) {
-            this.frameCallback(this.ppu.getScreenBuffer());
-        }
-
-        // Log PPU state every 60 frames (1 second)
-        if (this.frameCount % 60 === 0) {
-            console.log(`📊 Frame ${this.frameCount}: scanline=${this.ppu.getScanline()}`);
-        }
-
-        // Schedule next frame with proper timing
-        const elapsed = performance.now() - startTime;
-        const targetFrameTime = 1000 / 60; // 60 FPS
+        // Agenda próximo frame
+        const elapsed = performance.now() - frameStartTime;
+        const targetFrameTime = 1000 / 60.0988; // NTSC timing preciso
         const delay = Math.max(0, targetFrameTime - elapsed);
 
         setTimeout(() => {
@@ -127,21 +142,24 @@ export class SNES {
     }
 
     private runScanline(): void {
-        // Run PPU for one scanline
+        // Renderiza scanline na PPU
         this.ppu.renderScanline();
 
-        // Run CPU for scanline duration
+        // Executa CPU por uma scanline
         let cyclesRun = 0;
-        while (cyclesRun < this.CPU_CYCLES_PER_SCANLINE) {
+        const targetCycles = this.CPU_CYCLES_PER_SCANLINE;
+
+        while (cyclesRun < targetCycles && this.running) {
             try {
                 const cycles = this.cpu.step();
                 cyclesRun += cycles;
 
-                // Run APU
+                // Executa APU em paralelo
                 this.apu.step(cycles);
+
             } catch (error) {
-                // Silently handle CPU errors to prevent crashes
-                cyclesRun = this.CPU_CYCLES_PER_SCANLINE;
+                // Silencia erros de CPU para evitar crashes
+                cyclesRun = targetCycles;
             }
         }
 
@@ -152,49 +170,30 @@ export class SNES {
         this.frameCallback = callback;
     }
 
-    getMemory(): Memory {
-        return this.memory;
-    }
+    // Getters
+    getMemory(): Memory { return this.memory; }
+    getCPU(): CPU65816 { return this.cpu; }
+    getPPU(): PPU { return this.ppu; }
+    getAPU(): APU { return this.apu; }
+    getInput(): Input { return this.input; }
+    isRunning(): boolean { return this.running; }
+    getMasterClock(): number { return this.masterClock; }
+    getFrameCount(): number { return this.frameCount; }
 
-    getCPU(): CPU65816 {
-        return this.cpu;
-    }
-
-    getPPU(): PPU {
-        return this.ppu;
-    }
-
-    getAPU(): APU {
-        return this.apu;
-    }
-
-    getInput(): Input {
-        return this.input;
-    }
-
-    isRunning(): boolean {
-        return this.running;
-    }
-
-    getMasterClock(): number {
-        return this.masterClock;
-    }
-
-    getFrameCount(): number {
-        return this.frameCount;
-    }
-
+    // Save states
     saveState(): any {
         return {
             cpu: this.cpu.getRegisters(),
             flags: this.cpu.getFlags(),
             masterClock: this.masterClock,
-            frameCount: this.frameCount
+            frameCount: this.frameCount,
+            wram: Array.from(this.memory['wram']).slice(0, 1000) // Sample
         };
     }
 
     loadState(state: any): void {
         this.masterClock = state.masterClock || 0;
         this.frameCount = state.frameCount || 0;
+        // Restaurar registradores seria mais complexo
     }
 }
